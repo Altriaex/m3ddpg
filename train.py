@@ -1,18 +1,14 @@
+import os
+os.environ["CUDA_VISIBLE_DEVICES"]="-1" 
 import argparse
 import numpy as np
 import tensorflow as tf
 import time
 import pickle
-import sys
-import os
-
-sys.path.append('../')
-sys.path.append('../../')
-sys.path.append('../../../')
-
 import maddpg.common.tf_util as U
-from maddpg.trainer.maddpg import MADDPGAgentTrainer
+from m3ddpg import M3DDPGAgentTrainer
 import tensorflow.contrib.layers as layers
+from tensorflow.python import pywrap_tensorflow
 
 def parse_args():
     parser = argparse.ArgumentParser("Reinforcement Learning experiments for multiagent environments")
@@ -31,8 +27,9 @@ def parse_args():
     parser.add_argument("--adv-eps", type=float, default=1e-3, help="adversarial training rate")
     parser.add_argument("--adv-eps-s", type=float, default=1e-5, help="small adversarial training rate")
     # Checkpointing
+    parser.add_argument("--exp-id", type=int, default=0)
     parser.add_argument("--exp-name", type=str, default=None, help="name of the experiment")
-    parser.add_argument("--save-dir", type=str, default="/tmp/policy/", help="directory in which training state and model should be saved")
+    parser.add_argument("--save-dir", type=str, default="policy", help="directory in which training state and model should be saved")
     parser.add_argument("--save-rate", type=int, default=1000, help="save model once every time this many episodes are completed")
     parser.add_argument("--load-name", type=str, default="", help="name of which training state and model are loaded, leave blank to load seperately")
     parser.add_argument("--load-good", type=str, default="", help="which good policy to load")
@@ -74,7 +71,7 @@ def make_env(scenario_name, arglist, benchmark=False):
 def get_trainers(env, num_adversaries, obs_shape_n, arglist):
     trainers = []
     model = mlp_model
-    trainer = MADDPGAgentTrainer
+    trainer = M3DDPGAgentTrainer
     for i in range(num_adversaries):
         print("{} bad agents".format(i))
         policy_name = arglist.bad_policy
@@ -89,10 +86,18 @@ def get_trainers(env, num_adversaries, obs_shape_n, arglist):
             policy_name == 'ddpg', policy_name, policy_name == 'mmmaddpg'))
     return trainers
 
-
 def train(arglist):
     if arglist.test:
         np.random.seed(71)
+    if not os.path.exists("exp-{}".format(arglist.exp_id)):
+        os.mkdir("exp-{}".format(arglist.exp_id))
+    base = os.path.join("exp-{}".format(arglist.exp_id), "m3ddpg_"+arglist.scenario)
+    save_dir = os.path.join(base, arglist.save_dir)
+    benchmark_dir = os.path.join(base, arglist.benchmark_dir)
+    plots_dir = os.path.join(base, arglist.plots_dir)
+    for dir in [base, benchmark_dir, plots_dir]:
+        if not os.path.exists(dir):
+            os.mkdir(dir)
     with U.single_threaded_session():
         # Create environment
         env = make_env(arglist.scenario, arglist, arglist.benchmark)
@@ -122,7 +127,13 @@ def train(arglist):
                 U.load_state(arglist.load_good, saver)
             else:
                 print('Loading previous state from {}'.format(arglist.load_name))
-                U.load_state(arglist.load_name)
+                U.load_state(save_dir)
+                reader = pywrap_tensorflow.NewCheckpointReader(save_dir)
+                var_to_shape_map = reader.get_variable_to_shape_map()
+                # Print tensor name and values
+                #for key in var_to_shape_map:
+                #    print("tensor_name: ", key)
+                #exit()
 
         episode_rewards = [0.0]  # sum of rewards for all agents
         agent_rewards = [[0.0] for _ in range(env.n)]  # individual agent reward
@@ -169,7 +180,7 @@ def train(arglist):
                 for i, info in enumerate(info_n):
                     agent_info[-1][i].append(info_n['n'])
                 if train_step > arglist.benchmark_iters and (done or terminal):
-                    file_name = arglist.benchmark_dir + arglist.exp_name + '.pkl'
+                    file_name = os.path.join(benchmark_dir,'benchmark.pkl')
                     print('Finished benchmarking, now saving...')
                     with open(file_name, 'wb') as fp:
                         pickle.dump(agent_info[:-1], fp)
@@ -180,6 +191,8 @@ def train(arglist):
             if arglist.display:
                 time.sleep(0.1)
                 env.render()
+                #while True:
+                #    time.sleep(0.1)
                 continue
 
             # update all trainers, if not in display or benchmark mode
@@ -192,7 +205,7 @@ def train(arglist):
 
             # save model, display training output
             if terminal and (len(episode_rewards) % arglist.save_rate == 0):
-                U.save_state(arglist.save_dir, global_step = len(episode_rewards), saver=saver)
+                U.save_state(save_dir, saver=saver)
                 # print statement depends on whether or not there are adversaries
                 if num_adversaries == 0:
                     print("steps: {}, episodes: {}, mean episode reward: {}, time: {}".format(
@@ -209,17 +222,8 @@ def train(arglist):
 
             # saves final episode reward for plotting training curve later
             if len(episode_rewards) > arglist.num_episodes:
-                suffix = '_test.pkl' if arglist.test else '.pkl'
-                rew_file_name = arglist.plots_dir + arglist.exp_name + '_rewards' + suffix
-                agrew_file_name = arglist.plots_dir + arglist.exp_name + '_agrewards' + suffix
-
-                if not os.path.exists(os.path.dirname(rew_file_name)):
-                    try:
-                        os.makedirs(os.path.dirname(rew_file_name))
-                    except OSError as exc:
-                        if exc.errno != errno.EEXIST:
-                            raise
-
+                rew_file_name = os.path.join(plots_dir, 'rewards.pkl')
+                agrew_file_name = os.path.join(plots_dir, 'agrewards.pkl')
                 with open(rew_file_name, 'wb') as fp:
                     pickle.dump(final_ep_rewards, fp)
                 with open(agrew_file_name, 'wb') as fp:
